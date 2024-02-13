@@ -3056,7 +3056,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 
 	if(!strcasecmp(request_text, "list")) {
 		JANUS_LOG(LOG_VERB, "Request for the list of mountpoints\n");
-		gboolean lock_mp_list = TRUE;
+		gboolean admin = FALSE;
 		if(admin_key != NULL) {
 			json_t *admin_key_json = json_object_get(root, "admin_key");
 			/* Verify admin_key if it was provided */
@@ -3066,7 +3066,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 				if(error_code != 0) {
 					goto prepare_response;
 				} else {
-					lock_mp_list = FALSE;
+					admin = TRUE;
 				}
 			}
 		}
@@ -3078,7 +3078,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 		g_hash_table_iter_init(&iter, mountpoints);
 		while(g_hash_table_iter_next(&iter, NULL, &value)) {
 			janus_streaming_mountpoint *mp = value;
-			if(mp->is_private && lock_mp_list) {
+			if(mp->is_private && !admin) {
 				/* Skip private stream if no valid admin_key was provided */
 				JANUS_LOG(LOG_VERB, "Skipping private mountpoint '%s'\n", mp->description);
 				continue;
@@ -3087,20 +3087,56 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			json_t *ml = json_object();
 			json_object_set_new(ml, "id", string_ids ? json_string(mp->id_str) : json_integer(mp->id));
 			json_object_set_new(ml, "type", json_string(mp->streaming_type == janus_streaming_type_live ? "live" : "on demand"));
-			json_object_set_new(ml, "description", json_string(mp->description));
+			if(mp->description)
+				json_object_set_new(ml, "description", json_string(mp->description));
 			if(mp->metadata) {
 				json_object_set_new(ml, "metadata", json_string(mp->metadata));
 			}
+			if(admin && mp->name)
+				json_object_set_new(ml, "name", json_string(mp->name));
+			if(admin && mp->secret)
+				json_object_set_new(ml, "secret", json_string(mp->secret));
+			if(admin && mp->pin)
+				json_object_set_new(ml, "pin", json_string(mp->pin));
+			if(admin && mp->is_private)
+				json_object_set_new(ml, "is_private", json_true());
 			json_object_set_new(ml, "enabled", mp->enabled ? json_true() : json_false());
+			if(admin)
+				json_object_set_new(ml, "viewers", json_integer(mp->viewers ? g_list_length(mp->viewers) : 0));
 			if(mp->streaming_source == janus_streaming_source_rtp) {
 				janus_streaming_rtp_source *source = mp->source;
+				/* Global stuff first */
 				gint64 now = janus_get_monotonic_time();
 				json_t *media = json_array();
+#ifdef HAVE_LIBCURL
+				if(source->rtsp) {
+					json_object_set_new(ml, "rtsp", json_true());
+					if(admin) {
+						if(source->rtsp_url)
+							json_object_set_new(ml, "url", json_string(source->rtsp_url));
+						if(source->rtsp_username)
+							json_object_set_new(ml, "rtsp_user", json_string(source->rtsp_username));
+						if(source->rtsp_password)
+							json_object_set_new(ml, "rtsp_pwd", json_string(source->rtsp_password));
+						if(source->rtsp_quirk)
+							json_object_set_new(ml, "rtsp_quirk", json_true());
+					}
+				}
+#endif
+				if(source->is_srtp) {
+					json_object_set_new(ml, "srtp", json_true());
+				}
+				if(source->rtp_collision > 0)
+					json_object_set_new(ml, "collision", json_integer(source->rtp_collision));
+				if(mp->helper_threads > 0)
+					json_object_set_new(ml, "threads", json_integer(mp->helper_threads));
+				/* Iterate on media now */
 				GList *temp = source->media;
 				while(temp) {
 					json_t *info = json_object();
 					janus_streaming_rtp_source_stream *stream = (janus_streaming_rtp_source_stream *)temp->data;
 					json_object_set_new(info, "mid", json_string(stream->mid));
+					json_object_set_new(info, "mindex", json_integer(stream->mindex));
 					json_object_set_new(info, "type", json_string(janus_streaming_media_str(stream->type)));
 					json_object_set_new(info, "label", json_string(stream->label));
 					if(stream->msid && stream->mstid) {
@@ -3108,8 +3144,54 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						g_snprintf(msid, sizeof(msid), "%s %s", stream->msid, stream->mstid);
 						json_object_set_new(info, "msid", json_string(msid));
 					}
+					if(stream->codecs.pt != -1)
+						json_object_set_new(info, "pt", json_integer(stream->codecs.pt));
+					if(stream->codecs.audio_codec != JANUS_AUDIOCODEC_NONE) {
+						const char *codec = janus_audiocodec_name(stream->codecs.audio_codec);
+						if(codec != NULL) {
+							json_object_set_new(info, "codec", json_string(codec));
+							json_object_set_new(info, "rtpmap", json_string(janus_sdp_get_codec_rtpmap(codec)));
+						}
+					}
+					if(stream->codecs.video_codec != JANUS_VIDEOCODEC_NONE) {
+						const char *codec = janus_videocodec_name(stream->codecs.video_codec);
+						if(codec != NULL) {
+							json_object_set_new(info, "codec", json_string(codec));
+							json_object_set_new(info, "rtpmap", json_string(janus_sdp_get_codec_rtpmap(codec)));
+						}
+					}
+					if(stream->codecs.fmtp)
+						json_object_set_new(info, "fmtp", json_string(stream->codecs.fmtp));
+					if(stream->keyframe.enabled) {
+						json_object_set_new(info, "videobufferkf", json_true());
+					}
+					if(stream->simulcast) {
+						json_object_set_new(info, "videosimulcast", json_true());
+					}
+					if(stream->svc) {
+						json_object_set_new(info, "videosvc", json_true());
+					}
+					if(stream->skew)
+						json_object_set_new(info, "skew_compensation", json_true());
+					if(admin) {
+						if(stream->host)
+							json_object_set_new(ml, "host", json_string(stream->host));
+						json_object_set_new(info, "port", json_integer(stream->port[0]));
+						if(stream->rtcp_port > -1)
+							json_object_set_new(info, "rtcpport", json_integer(stream->rtcp_port));
+						if(stream->port[1] > -1)
+							json_object_set_new(info, "port2", json_integer(stream->port[1]));
+						if(stream->port[2] > -1)
+							json_object_set_new(info, "port3", json_integer(stream->port[2]));
+					}
+					if(stream->type == JANUS_STREAMING_MEDIA_DATA)
+						json_object_set_new(info, "datatype", json_string(stream->textdata ? "text" : "binary"));
 					if(stream->fd[0] != -1 || stream->fd[1] != -1 || stream->fd[2] != -1)
 						json_object_set_new(info, "age_ms", json_integer((now - stream->last_received[0]) / 1000));
+					janus_mutex_lock(&source->rec_mutex);
+					if(admin && stream->rc && stream->rc->filename)
+						json_object_set_new(info, "recording", json_string(stream->rc->filename));
+					janus_mutex_unlock(&source->rec_mutex);
 					json_array_append_new(media, info);
 					temp = temp->next;
 				}
