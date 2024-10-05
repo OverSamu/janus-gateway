@@ -313,11 +313,22 @@ janus_sdp *janus_sdp_parse(const char *sdp, char *error, size_t errlen) {
 	janus_sdp_mline *mline = NULL;
 	int mlines = 0;
 
-	gchar **parts = g_strsplit(sdp, "\n", -1);
+	/* g_strsplit is inefficient in case of SDPs with a large number of lines,
+	 * so we limit the max tokens. Set to -1 for "unlimited". */
+	const gint MAX_ALLOWED_SDP_LINES = 10000;
+	gchar **parts = g_strsplit(sdp, "\n", MAX_ALLOWED_SDP_LINES);
 	if(parts) {
 		int index = 0;
 		char *line = NULL, *cr = NULL;
 		while(success && (line = parts[index]) != NULL) {
+			cr = strchr(line, '\n');
+			if(cr != NULL) {
+				printf("Can't parse more than %d lines\n", MAX_ALLOWED_SDP_LINES);
+				if(error)
+					g_snprintf(error, errlen, "Can't parse more than %d lines", MAX_ALLOWED_SDP_LINES);
+				success = FALSE;
+				break;
+			}
 			cr = strchr(line, '\r');
 			if(cr != NULL)
 				*cr = '\0';
@@ -808,6 +819,7 @@ int janus_sdp_get_codec_pt_full(janus_sdp *sdp, int index, const char *codec, co
 						pts = g_list_append(pts, GINT_TO_POINTER(pt));
 					} else {
 						/* Payload type for codec found */
+						g_list_free(pts);
 						return pt;
 					}
 				}
@@ -833,6 +845,7 @@ int janus_sdp_get_codec_pt_full(janus_sdp *sdp, int index, const char *codec, co
 						if(strstr(a->value, profile_id) != NULL) {
 							/* Found */
 							JANUS_LOG(LOG_VERB, "VP9 profile %s found --> %d\n", profile, pt);
+							g_list_free(pts);
 							return pt;
 						}
 					} else if(h264 && strstr(a->value, "packetization-mode=0") == NULL) {
@@ -844,6 +857,7 @@ int janus_sdp_get_codec_pt_full(janus_sdp *sdp, int index, const char *codec, co
 						if(strstr(a->value, profile_level_id) != NULL) {
 							/* Found */
 							JANUS_LOG(LOG_VERB, "H.264 profile %s found --> %d\n", profile, pt);
+							g_list_free(pts);
 							return pt;
 						}
 						/* Not found, try converting the profile to upper case */
@@ -853,6 +867,7 @@ int janus_sdp_get_codec_pt_full(janus_sdp *sdp, int index, const char *codec, co
 						if(strstr(a->value, profile_level_id) != NULL) {
 							/* Found */
 							JANUS_LOG(LOG_VERB, "H.264 profile %s found --> %d\n", profile, pt);
+							g_list_free(pts);
 							return pt;
 						}
 					}
@@ -860,8 +875,7 @@ int janus_sdp_get_codec_pt_full(janus_sdp *sdp, int index, const char *codec, co
 				ma = ma->next;
 			}
 		}
-		if(pts != NULL)
-			g_list_free(pts);
+		g_list_free(pts);
 		if(index != -1)
 			break;
 		ml = ml->next;
@@ -2208,7 +2222,7 @@ int janus_sdp_generate_answer_mline(janus_sdp *offer, janus_sdp *answer, janus_s
 						a = janus_sdp_attribute_create("rtcp-fb", "%d goog-remb", pt);
 						am->attributes = g_list_append(am->attributes, a);
 					}
-					/* It is safe to add transport-wide rtcp feedback mesage here, won't be used unless the header extension is negotiated*/
+					/* It is safe to add transport-wide rtcp feedback message here, won't be used unless the header extension is negotiated*/
 					a = janus_sdp_attribute_create("rtcp-fb", "%d transport-cc", pt);
 					am->attributes = g_list_append(am->attributes, a);
 				}

@@ -696,8 +696,8 @@
 
 
 /* Plugin information */
-#define JANUS_SIP_VERSION			8
-#define JANUS_SIP_VERSION_STRING	"0.0.8"
+#define JANUS_SIP_VERSION			9
+#define JANUS_SIP_VERSION_STRING	"0.0.9"
 #define JANUS_SIP_DESCRIPTION		"This is a simple SIP plugin for Janus, allowing WebRTC peers to register at a SIP server and call SIP user agents through a Janus instance."
 #define JANUS_SIP_NAME				"JANUS SIP plugin"
 #define JANUS_SIP_AUTHOR			"Meetecho s.r.l."
@@ -1532,7 +1532,7 @@ static void *janus_sip_relay_thread(void *data);
 static void janus_sip_media_cleanup(janus_sip_session *session);
 static void janus_sip_check_rfc2833(janus_sip_session *session, char *buffer, int len);
 
-/* URI parsing utilies */
+/* URI parsing utilities */
 
 #define JANUS_SIP_URI_MAXLEN	1024
 typedef struct {
@@ -1688,7 +1688,7 @@ static void janus_sip_parse_custom_contact_params(json_t *root, char *custom_par
 char sofia_log[3072];
 char call_id[255];
 gboolean skip = FALSE, started = FALSE, append = FALSE;
-static void janus_sip_sofia_logger(void *stream, char const *fmt, va_list ap) {
+static void janus_sip_sofia_logger_siptrace_multi_log_callback(void *stream, char const *fmt, va_list ap) {
 	if(!fmt)
 		return;
 	char line[255];
@@ -1801,6 +1801,92 @@ static void janus_sip_sofia_logger(void *stream, char const *fmt, va_list ap) {
 	}
 }
 
+static void janus_sip_sofia_logger_siptrace_single_log_callback(void *stream, char const *fmt, va_list ap) {
+	/* Since the fmt format string in the current Sofia SIP tport_log_msg function implementation is just "%s\n",
+	 * it's more efficient to directly work with the siptrace buffer. */
+	char *buffer = va_arg(ap, char *);
+
+	/* Check if this is a message we need */
+	if(strstr(buffer, "send ") == buffer) {
+		/* An outgoing message is going to be logged, prepare for that */
+		int length = atoi(&buffer[5]);
+		JANUS_LOG(LOG_HUGE, "Intercepting message (%d bytes)\n", length);
+		/* Skip the stamp line */
+		buffer = strchr(buffer, '\n');
+		if(!buffer) {
+			JANUS_LOG(LOG_WARN, "No newline after the stamp in this message, dropping it...\n");
+			return;
+		}
+		buffer++;
+		/* Skip the separator line */
+		buffer = strchr(buffer, '\n');
+		if(!buffer) {
+			JANUS_LOG(LOG_WARN, "No newline after the separator in this message, dropping it...\n");
+			return;
+		}
+		buffer++;
+		/* If this is an OPTIONS, we don't care: drop it */
+		if(strstr(buffer, "OPTIONS") == buffer)
+			return;
+		/* Search for the Call-ID header and extract its value if it exists */
+		char *from = strstr(buffer, "Call-ID: ");
+		if(from) {
+			char *start = from + 9;
+			if(start) {
+				char *end = strchr(start, '\n');
+				if(end) {
+					size_t count = end - start;
+					count = count >= sizeof(call_id) ? sizeof(call_id) - 1 : count;
+					memcpy(call_id, start, count);
+					call_id[count] = '\0';
+				}
+			}
+		}
+		/* Look for the session this message belongs to */
+		janus_sip_session *session = NULL;
+		janus_mutex_lock(&sessions_mutex);
+		if(strlen(call_id))
+			session = g_hash_table_lookup(callids, call_id);
+		if(!session) {
+			/* Couldn't find any SIP session with that Call-ID, check the request */
+			if(strstr(buffer, "REGISTER") == buffer || strstr(buffer, "SIP/2.0 ") == buffer) {
+				/* FIXME This is a REGISTER or a response code:
+				* check the To header and get the identity from there */
+				char *from = strstr(buffer, "To: ");
+				if(from) {
+					char *start = strstr(from + 4, "<");
+					if(start) {
+						start++;
+						char *end = strstr(from, ">");
+						if(end) {
+							size_t count = end - start;
+							count = count >= sizeof(call_id) ? sizeof(call_id) - 1 : count;
+							memcpy(call_id, start, count);
+							call_id[count] = '\0';
+							session = g_hash_table_lookup(identities, call_id);
+						}
+					}
+				}
+			}
+		}
+		if(session)
+			janus_refcount_increase(&session->ref);
+		janus_mutex_unlock(&sessions_mutex);
+		if(session) {
+			/* Notify event handlers about the content of the whole outgoing SIP message */
+			json_t *info = json_object();
+			json_object_set_new(info, "event", json_string("sip-out"));
+			json_object_set_new(info, "sip", json_string(buffer));
+			gateway->notify_event(&janus_sip_plugin, session->handle, info);
+			janus_refcount_decrease(&session->ref);
+		} else {
+			JANUS_LOG(LOG_WARN, "Couldn't find a session associated to this message, dropping it...\n%s", buffer);
+		}
+	}
+}
+
+static su_logger_f *janus_sip_sofia_logger = janus_sip_sofia_logger_siptrace_multi_log_callback;
+
 /* Helpers to ref/unref sessions with active calls */
 static void janus_sip_ref_active_call(janus_sip_session *session) {
 	if(session == NULL)
@@ -1858,6 +1944,9 @@ int janus_sip_init(janus_callbacks *callback, const char *config_path) {
 			/* Versions of Sofia SIP >= 1.13 apparently don't add a Contact header in
 			 * dialogs, so we'll query it ourselves using nua_get_params (see #2597) */
 			query_contact_header = TRUE;
+			/* In Sofia SIP versions >= 1.13, the su_log_redirect callback function is called only once for the entire SIP message trace.
+			 * In prior versions, the su_log_redirect callback function was called line by line. */
+			janus_sip_sofia_logger = janus_sip_sofia_logger_siptrace_single_log_callback;
 		}
 	}
 
@@ -2466,7 +2555,7 @@ void janus_sip_setup_media(janus_plugin_session *handle) {
 	g_atomic_int_set(&session->establishing, 0);
 	g_atomic_int_set(&session->hangingup, 0);
 	janus_mutex_unlock(&sessions_mutex);
-	/* TODO Only relay RTP/RTCP when we get this event */
+	/* Only relay RTP/RTCP when we get this event */
 }
 
 void janus_sip_incoming_rtp(janus_plugin_session *handle, janus_plugin_rtp *packet) {
@@ -2965,13 +3054,13 @@ static void *janus_sip_handler(void *data) {
 			gboolean send_register = TRUE;
 			json_t *do_register = json_object_get(root, "send_register");
 			if(do_register != NULL) {
-				if(guest) {
+				send_register = json_is_true(do_register);
+				if(guest && send_register) {
 					JANUS_LOG(LOG_ERR, "Conflicting elements: send_register cannot be true if guest is true\n");
 					error_code = JANUS_SIP_ERROR_INVALID_ELEMENT;
 					g_snprintf(error_cause, 512, "Conflicting elements: send_register cannot be true if guest is true");
 					goto error;
 				}
-				send_register = json_is_true(do_register);
 			}
 
 			gboolean sips = FALSE;
@@ -4286,7 +4375,7 @@ static void *janus_sip_handler(void *data) {
 			if(session->stack->s_nh_i == NULL) {
 				JANUS_LOG(LOG_WARN, "NUA Handle for 200 OK still null??\n");
 			}
-			int response_code = 486;
+			int response_code = 603;
 			json_t *code_json = json_object_get(root, "code");
 			if(code_json)
 				response_code = json_integer_value(code_json);
@@ -5054,7 +5143,7 @@ void janus_sip_sofia_callback(nua_event_t event, int status, char const *phrase,
 			break;
 		case nua_i_state:;
 			tagi_t const *ti = tl_find(tags, nutag_callstate);
-			enum nua_callstate callstate = ti ? ti->t_value : -1;
+			enum nua_callstate callstate = ti ? ti->t_value : nua_callstate_init;
 			JANUS_LOG(LOG_VERB, "[%s][%s]: %d %s, call state [%s]\n", session->account.username, nua_event_name(event), status, phrase ? phrase : "??", nua_callstate_name(callstate));
 			/* There are several call states, but we care about the terminated state in order to send the 'hangup' event
 			 * and the proceeding state in order to send the 'proceeding' event so the client can play a ringback tone for
@@ -5141,8 +5230,12 @@ void janus_sip_sofia_callback(nua_event_t event, int status, char const *phrase,
 				session->hangup_reason_header = NULL;
 				session->hangup_reason_header_protocol = NULL;
 				session->hangup_reason_header_cause = NULL;
-				if(g_atomic_int_get(&session->establishing) || g_atomic_int_get(&session->established))
+				if(g_atomic_int_get(&session->establishing) || g_atomic_int_get(&session->established)) {
+					/* Get rid of the PeerConnection in the core */
 					gateway->close_pc(session->handle);
+					/* Also clean up locally, in case there was no PC */
+					janus_sip_hangup_media_internal(session->handle);
+				}
 			} else if(session->stack->s_nh_i == nh && callstate == nua_callstate_calling && session->status == janus_sip_call_status_incall) {
 				/* Have just sent re-INVITE */
 				janus_sip_call_update_status(session, janus_sip_call_status_incall_reinviting);
@@ -5649,7 +5742,7 @@ void janus_sip_sofia_callback(nua_event_t event, int status, char const *phrase,
 			if(status >= 200 && ssip != NULL) {
 				/* Check if this session (and/or its helpers) had dangling
 				 * references for ongoing calls: we won't receive other events
-				 * after this, so it's up to us to clean up after ourselfes */
+				 * after this, so it's up to us to clean up after ourselves */
 				janus_mutex_lock(&session->mutex);
 				while(session->active_calls) {
 					janus_sip_session *s = (janus_sip_session *)session->active_calls->data;
@@ -5680,7 +5773,7 @@ void janus_sip_sofia_callback(nua_event_t event, int status, char const *phrase,
 			break;
 		case nua_r_message:
 			JANUS_LOG(LOG_VERB, "[%s][%s]: %d %s\n", session->account.username, nua_event_name(event), status, phrase ? phrase : "??");
-			/* Handle authetntication for SIP MESSAGE - eg. SippySoft Softswitch requires 401 authentication even if SIP user is registerered */
+			/* Handle authentication for SIP MESSAGE - eg. SippySoft Softswitch requires 401 authentication even if SIP user is registered */
 			if(status == 401 || status == 407) {
 				const char *scheme = NULL;
 				const char *realm = NULL;
