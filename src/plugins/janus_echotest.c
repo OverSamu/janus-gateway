@@ -206,8 +206,6 @@ static struct janus_json_parameter request_parameters[] = {
 	{"svc", JANUS_JSON_BOOL, 0},
 	{"spatial_layer", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"temporal_layer", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-	{"record", JANUS_JSON_BOOL, 0},
-	{"filename", JSON_STRING, 0},
 	{"audiocodec", JSON_STRING, 0},
 	{"videocodec", JSON_STRING, 0},
 	{"videoprofile", JSON_STRING, 0},
@@ -281,6 +279,7 @@ static void janus_echotest_session_free(const janus_refcount *session_ref) {
 	janus_mutex_destroy(&session->rid_mutex);
 	janus_mutex_destroy(&session->rec_mutex);
 	janus_rtp_simulcasting_cleanup(NULL, NULL, session->rid, NULL);
+	janus_rtp_svc_context_reset(&session->svc_context);
 	g_free(session);
 }
 

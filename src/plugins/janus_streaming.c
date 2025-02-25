@@ -401,7 +401,21 @@ multistream-test: {
 			"type" : "<audio|video|data>",
 			"mid" : "<unique mid to assign to this stream in negotiated PeerConnections>",
 			"msid" : "<msid to add to the m-line, if needed>",
+			"label", "<optional label to name the track>",
+			"mcast", "<multicast group for receiving packets, if any>",
+			"iface", "<network interface or IP address to bind to, if any (binds to all otherwise)>",
 			"port" : <port to bind to, to receive media to relay>",
+			"rtcpport", <port to bind to for receiving and sending audio RTCP feedback, if any>,
+			"pt", <RTP payload type (audio/video only)>,
+			"codec", "<name of the codec that will be used for this track (audio/video only)>",
+			"fmtp", "<codec specific parameters, if any (audio/video only)>",
+			"skew", <true|false (whether the plugin should perform skew
+				analysis and compensation on incoming RTP streams, EXPERIMENTAL)>
+			"simulcast", <true|false (do|don't enable video simulcasting)>,
+			"port2", <second local port for receiving video frames (only for RTP video, and simulcasting)>,
+			"port3", <third local port for receiving video frames (only for RTP video, and simulcasting)>,
+			"svc", <true|false (whether the RTP video will have SVC support; works only for VP9-SVC, default=false)>,
+			"datatype", "<text|binary (type of data this mountpoint will relay, default=text)>",
 			...
 		}.
 		... other streams, if any ...
@@ -2206,8 +2220,8 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 								textdata = FALSE;
 							else {
 								JANUS_LOG(LOG_ERR, "Can't add 'rtp' mountpoint '%s', invalid data type '%s'...\n", cat->name, dt->value);
-								cl = cl->next;
-								continue;
+								failed = TRUE;
+								break;
 							}
 						}
 						const char *streamcodec = (codec && codec->value ? codec->value : NULL);
@@ -2268,6 +2282,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 						ml = ml->next;
 					}
 					if(failed) {
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						cl = cl->next;
 						continue;
 					}
@@ -2460,6 +2475,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 							doaskew, FALSE, FALSE, FALSE, FALSE, FALSE);
 						if(stream == NULL) {
 							JANUS_LOG(LOG_ERR, "Skipping 'audio' stream '%s', error creating source stream...\n", cat->name);
+							g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 							cl = cl->next;
 							continue;
 						}
@@ -2485,6 +2501,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 							dovskew, bufferkf, simulcast, dosvc, FALSE, FALSE);
 						if(stream == NULL) {
 							JANUS_LOG(LOG_ERR, "Skipping 'video' stream '%s', error creating source stream...\n", cat->name);
+							g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 							cl = cl->next;
 							continue;
 						}
@@ -2505,6 +2522,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 							FALSE, FALSE, FALSE, FALSE, textdata, buffermsg);
 						if(stream == NULL) {
 							JANUS_LOG(LOG_ERR, "Skipping 'data' stream '%s', error creating source stream...\n", cat->name);
+							g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 							cl = cl->next;
 							continue;
 						}
@@ -3560,6 +3578,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', unsupported media type...\n", (const char *)json_string_value(name));
 						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 						g_snprintf(error_cause, 512, "Unsupported media type in media stream");
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3600,6 +3619,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 							JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', invalid network interface configuration for media stream...\n", (const char *)json_string_value(name));
 							error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 							g_snprintf(error_cause, 512, ifas ? "Invalid network interface configuration for media stream" : "Unable to query network device information");
+							g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 							janus_mutex_lock(&mountpoints_mutex);
 							g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 							janus_mutex_unlock(&mountpoints_mutex);
@@ -3640,6 +3660,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 								JANUS_LOG(LOG_ERR, "Invalid element (datatype can only be text or binary)\n");
 								error_code = JANUS_STREAMING_ERROR_INVALID_ELEMENT;
 								g_snprintf(error_cause, 512, "Invalid element (datatype can only be text or binary)");
+								g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 								janus_mutex_lock(&mountpoints_mutex);
 								g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 								janus_mutex_unlock(&mountpoints_mutex);
@@ -3657,6 +3678,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', error creating data source stream...\n", (const char *)json_string_value(name));
 						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 						g_snprintf(error_cause, 512, "Can't add 'rtp' stream, error creating data source stream");
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3695,6 +3717,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						error_code, error_cause, TRUE,
 						JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
 					if(error_code != 0) {
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3747,6 +3770,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', error creating audio source stream...\n", (const char *)json_string_value(name));
 						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 						g_snprintf(error_cause, 512, "Can't add 'rtp' stream, error creating audio source stream");
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3765,6 +3789,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						error_code, error_cause, TRUE,
 						JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
 					if(error_code != 0) {
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3835,6 +3860,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', error creating video source stream...\n", (const char *)json_string_value(name));
 						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 						g_snprintf(error_cause, 512, "Can't add 'rtp' stream, error creating video source stream");
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3851,6 +3877,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						error_code, error_cause, TRUE,
 						JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
 					if(error_code != 0) {
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -3907,6 +3934,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 						JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', error creating data source stream...\n", (const char *)json_string_value(name));
 						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
 						g_snprintf(error_cause, 512, "Can't add 'rtp' stream, error creating data source stream");
+						g_list_free_full(streams, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 						janus_mutex_lock(&mountpoints_mutex);
 						g_hash_table_remove(mountpoints_temp, string_ids ? (gpointer)mpid_str : (gpointer)&mpid);
 						janus_mutex_unlock(&mountpoints_mutex);
@@ -4441,7 +4469,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 					}
 					if(stream->fd[0] != -1) {
 						if(stream->host)
-							json_object_set_new(ml, "host", json_string(stream->host));
+							json_object_set_new(info, "host", json_string(stream->host));
 						json_object_set_new(info, "port", json_integer(stream->port[0]));
 					}
 					if(stream->rtcp_fd != -1) {
@@ -5436,7 +5464,7 @@ static json_t *janus_streaming_process_synchronous_request(janus_streaming_sessi
 			if (stop_rec) {
 				stop_recording = json_is_true(stop_rec);
 			}
-			JANUS_LOG(LOG_INFO, "[%s] Stream disabled (stop_recording=%s)\n", mp->name, stop_recording ? "yes" : "no");
+			JANUS_LOG(LOG_INFO, "[%s] Stream disabled (stop_recording=%s)\n", mp->name, stop_recording ? "true" : "false");
 			/* Any recording to close? */
 			if(mp->streaming_source == janus_streaming_source_rtp && stop_recording) {
 				janus_streaming_rtp_source *source = mp->source;
@@ -7174,6 +7202,14 @@ done:
 			janus_mutex_unlock(&sessions_mutex);
 			if(g_atomic_int_get(&session->stopping) || !g_atomic_int_get(&session->started)) {
 				/* Been there, done that: ignore */
+				json_t *event = json_object();
+				json_object_set_new(event, "streaming", json_string("event"));
+				result = json_object();
+				json_object_set_new(result, "status", json_string("idle"));
+				json_object_set_new(event, "result", result);
+				int ret = gateway->push_event(msg->handle, &janus_streaming_plugin, msg->transaction, event, NULL);
+				JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (%s)\n", ret, janus_get_api_error(ret));
+				json_decref(event);
 				janus_streaming_message_free(msg);
 				continue;
 			}
@@ -7764,9 +7800,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 		if(len < SRTP_MASTER_LENGTH) {
 			JANUS_LOG(LOG_ERR, "Invalid SRTP crypto (%s)\n", srtpcrypto);
 			g_free(decoded);
-			janus_mutex_lock(&mountpoints_mutex);
-			g_hash_table_remove(mountpoints_temp, &id);
-			janus_mutex_unlock(&mountpoints_mutex);
+			g_list_free_full(media, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 			g_free(live_rtp_source);
 			g_free(live_rtp->name);
 			g_free(live_rtp->description);
@@ -7791,9 +7825,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 			/* Something went wrong... */
 			JANUS_LOG(LOG_ERR, "Error creating forwarder SRTP session: %d (%s)\n", res, janus_srtp_error_str(res));
 			g_free(decoded);
-			janus_mutex_lock(&mountpoints_mutex);
-			g_hash_table_remove(mountpoints_temp, &id);
-			janus_mutex_unlock(&mountpoints_mutex);
+			g_list_free_full(media, (GDestroyNotify)(janus_streaming_rtp_source_stream_unref));
 			g_free(live_rtp_source);
 			g_free(live_rtp->name);
 			g_free(live_rtp->description);
@@ -7921,17 +7953,11 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 	}
 	if(!doaudio && !dovideo) {
 		JANUS_LOG(LOG_ERR, "Can't add 'file' stream, no audio or video have to be streamed...\n");
-		janus_mutex_lock(&mountpoints_mutex);
-		g_hash_table_remove(mountpoints_temp, &id);
-		janus_mutex_unlock(&mountpoints_mutex);
 		return NULL;
 	}
 	/* FIXME We don't support video streaming from file yet */
 	if(!doaudio || dovideo) {
 		JANUS_LOG(LOG_ERR, "Can't add 'file' stream, we only support audio file streaming right now...\n");
-		janus_mutex_lock(&mountpoints_mutex);
-		g_hash_table_remove(mountpoints_temp, &id);
-		janus_mutex_unlock(&mountpoints_mutex);
 		return NULL;
 	}
 	/* TODO We should support something more than raw a-Law and mu-Law streams... */
@@ -7942,18 +7968,12 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 	if(!strstr(filename, ".alaw") && !strstr(filename, ".mulaw")) {
 		JANUS_LOG(LOG_ERR, "Can't add 'file' stream, unsupported format (we only support raw mu-Law and a-Law files right now)\n");
 #endif
-		janus_mutex_lock(&mountpoints_mutex);
-		g_hash_table_remove(mountpoints_temp, &id);
-		janus_mutex_unlock(&mountpoints_mutex);
 		return NULL;
 	}
 	janus_audiocodec audio_codec = janus_audiocodec_from_name(acodec);
 #ifdef HAVE_LIBOGG
 	if(strstr(filename, ".opus") && audio_codec != JANUS_AUDIOCODEC_OPUS) {
 		JANUS_LOG(LOG_ERR, "Can't add 'file' stream, opus file is not associated with an opus rtpmap\n");
-		janus_mutex_lock(&mountpoints_mutex);
-		g_hash_table_remove(mountpoints_temp, &id);
-		janus_mutex_unlock(&mountpoints_mutex);
 		return NULL;
 	}
 #endif
@@ -8991,18 +9011,12 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		/* Now connect to the RTSP server */
 		if(janus_streaming_rtsp_connect_to_server(live_rtsp) < 0) {
 			/* Error connecting, get rid of the mountpoint */
-			janus_mutex_lock(&mountpoints_mutex);
-			g_hash_table_remove(mountpoints_temp, &id);
-			janus_mutex_unlock(&mountpoints_mutex);
 			janus_refcount_decrease(&live_rtsp->ref);
 			return NULL;
 		}
 		/* Send an RTSP PLAY, now */
 		if(janus_streaming_rtsp_play(live_rtsp_source) < 0) {
 			/* Error trying to play, get rid of the mountpoint */
-			janus_mutex_lock(&mountpoints_mutex);
-			g_hash_table_remove(mountpoints_temp, &id);
-			janus_mutex_unlock(&mountpoints_mutex);
 			janus_refcount_decrease(&live_rtsp->ref);
 			return NULL;
 		}
@@ -9034,9 +9048,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 				janus_refcount_decrease(&helper->ref);
 				/* This extra unref is for the init */
 				janus_refcount_decrease(&helper->ref);
-				janus_mutex_lock(&mountpoints_mutex);
-				g_hash_table_remove(mountpoints_temp, &id);
-				janus_mutex_unlock(&mountpoints_mutex);
 				janus_refcount_decrease(&live_rtsp->ref);
 				return NULL;
 			}
@@ -9052,9 +9063,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 		JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the RTSP thread...\n",
 			error->code, error->message ? error->message : "??");
 		g_error_free(error);
-		janus_mutex_lock(&mountpoints_mutex);
-		g_hash_table_remove(mountpoints_temp, &id);
-		janus_mutex_unlock(&mountpoints_mutex);
 		janus_refcount_decrease(&live_rtsp->ref);	/* This is for the failed thread */
 		janus_refcount_decrease(&live_rtsp->ref);
 		return NULL;
